@@ -1,0 +1,9 @@
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+fastmcp
+python-dotenv
+markdown
+google-api-core
+google-api-core
+
