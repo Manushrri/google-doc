@@ -1,0 +1,971 @@
+import os
+import json
+import re
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
+from typing import Optional, List, Dict, Any, Annotated
+
+# Load .env file automatically from the same directory as this script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+env_path = os.path.join(script_dir, '.env')
+if os.path.exists(env_path):
+    load_dotenv(env_path)
+    print(f"Loaded environment variables from: {env_path}")
+else:
+    print(f"Warning: .env file not found at: {env_path}")
+
+def get_env(var: str) -> str:
+    """Fetch environment variable or raise error if missing."""
+    value = os.getenv(var)
+    if not value:
+        # Try to load from .env file in script directory if not found
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        env_path = os.path.join(script_dir, '.env')
+        if os.path.exists(env_path):
+            load_dotenv(env_path, override=True)
+            value = os.getenv(var)
+        if not value:
+            raise RuntimeError(f"Missing required environment variable: {var}")
+    return value
+
+def get_credentials() -> Credentials:
+    """Get Google Docs API credentials."""
+    creds = None
+    token_path = get_env("GOOGLE_TOKEN_PATH")
+    credentials_path = get_env("GOOGLE_CREDENTIALS_PATH")
+    
+    # Make paths relative to script directory if they're not absolute
+    if not os.path.isabs(token_path):
+        token_path = os.path.join(script_dir, token_path)
+    if not os.path.isabs(credentials_path):
+        credentials_path = os.path.join(script_dir, credentials_path)
+    
+    # Debug: Check if files exist
+    if not os.path.exists(credentials_path):
+        raise RuntimeError(f"Credentials file not found: {credentials_path}")
+    if not os.path.exists(token_path):
+        print(f"Token file not found: {token_path} (will be created on first auth)")
+    
+    # Load existing token if available
+    if os.path.exists(token_path) and os.path.getsize(token_path) > 0:
+        try:
+            creds = Credentials.from_authorized_user_file(token_path)
+        except Exception as e:
+            print(f"Warning: Could not load token file: {e}")
+            creds = None
+    
+    # If there are no (valid) credentials available, let the user log in
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                credentials_path, 
+                [
+                    'https://www.googleapis.com/auth/documents',
+                    'https://www.googleapis.com/auth/drive.file',
+                    'https://www.googleapis.com/auth/drive.readonly',
+                    'https://www.googleapis.com/auth/spreadsheets.readonly'
+                ]
+            )
+            creds = flow.run_local_server(port=0)
+        
+        # Save the credentials for the next run
+        with open(token_path, 'w') as token:
+            token.write(creds.to_json())
+    
+    return creds
+
+def get_docs_service():
+    """Get Google Docs service object."""
+    creds = get_credentials()
+    return build('docs', 'v1', credentials=creds)
+
+# Initialize MCP server
+mcp = FastMCP("googledocs-mcp")
+
+def docs_request(operation: str, document_id: str = None, **kwargs):
+    """Helper for Google Docs API requests."""
+    try:
+        service = get_docs_service()
+        
+        if operation == "create":
+            return service.documents().create(body=kwargs.get('body', {})).execute()
+        elif operation == "get":
+            return service.documents().get(documentId=document_id).execute()
+        elif operation == "copy":
+            # For copying documents, we need Drive API
+            from googleapiclient.discovery import build as build_drive
+            drive_service = build_drive('drive', 'v3', credentials=get_credentials())
+            return drive_service.files().copy(
+                fileId=document_id,
+                body=kwargs.get('body', {})
+            ).execute()
+        elif operation == "batchUpdate":
+            return service.documents().batchUpdate(
+                documentId=document_id, 
+                body=kwargs.get('body', {})
+            ).execute()
+        else:
+            raise RuntimeError(f"Unknown operation: {operation}")
+            
+    except HttpError as e:
+        raise RuntimeError(f"Google Docs API error: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Google Docs request error: {str(e)}")
+
+def _validate_required(params: Dict[str, Any], required: List[str]):
+    """Raise ValueError if any required params are missing/blank.
+
+    Treats empty strings, None, and empty lists as missing.
+    """
+    missing = []
+    for key in required:
+        value = params.get(key)
+        if value is None:
+            missing.append(key)
+        elif isinstance(value, str) and value.strip() == "":
+            missing.append(key)
+        elif isinstance(value, (list, dict)) and len(value) == 0:
+            missing.append(key)
+    if missing:
+        raise ValueError(f"Missing required parameter(s): {', '.join(missing)}")
+    return None
+
+def _markdown_to_google_docs_content(markdown_text: str) -> List[Dict[str, Any]]:
+    """Convert markdown text to Google Docs content format.
+    
+    This is a basic implementation that handles:
+    - Headers (# ## ###)
+    - Bold text (**text**)
+    - Italic text (*text*)
+    - Line breaks
+    - Basic paragraphs
+    """
+    lines = markdown_text.split('\n')
+    content = []
+    current_index = 1
+    
+    for line in lines:
+        if not line.strip():
+            # Empty line - add paragraph break
+            content.append({
+                "endIndex": current_index,
+                "startIndex": current_index - 1,
+                "paragraph": {
+                    "elements": [{"endIndex": current_index, "startIndex": current_index - 1, "textRun": {"content": "\n"}}]
+                }
+            })
+            current_index += 1
+            continue
+            
+        # Check for headers
+        if line.startswith('### '):
+            # H3 header
+            text = line[4:].strip()
+            content.append({
+                "endIndex": current_index + len(text),
+                "startIndex": current_index - 1,
+                "paragraph": {
+                    "elements": [{
+                        "endIndex": current_index + len(text),
+                        "startIndex": current_index - 1,
+                        "textRun": {
+                            "content": text,
+                            "textStyle": {"bold": True, "fontSize": {"magnitude": 14, "unit": "PT"}}
+                        }
+                    }]
+                }
+            })
+            current_index += len(text) + 1
+        elif line.startswith('## '):
+            # H2 header
+            text = line[3:].strip()
+            content.append({
+                "endIndex": current_index + len(text),
+                "startIndex": current_index - 1,
+                "paragraph": {
+                    "elements": [{
+                        "endIndex": current_index + len(text),
+                        "startIndex": current_index - 1,
+                        "textRun": {
+                            "content": text,
+                            "textStyle": {"bold": True, "fontSize": {"magnitude": 16, "unit": "PT"}}
+                        }
+                    }]
+                }
+            })
+            current_index += len(text) + 1
+        elif line.startswith('# '):
+            # H1 header
+            text = line[2:].strip()
+            content.append({
+                "endIndex": current_index + len(text),
+                "startIndex": current_index - 1,
+                "paragraph": {
+                    "elements": [{
+                        "endIndex": current_index + len(text),
+                        "startIndex": current_index - 1,
+                        "textRun": {
+                            "content": text,
+                            "textStyle": {"bold": True, "fontSize": {"magnitude": 18, "unit": "PT"}}
+                        }
+                    }]
+                }
+            })
+            current_index += len(text) + 1
+        else:
+            # Regular paragraph - process bold and italic
+            processed_text = line
+            elements = []
+            start_pos = 0
+            
+            # Simple bold and italic processing
+            while True:
+                # Find next bold or italic
+                bold_match = re.search(r'\*\*(.*?)\*\*', processed_text[start_pos:])
+                italic_match = re.search(r'\*(.*?)\*', processed_text[start_pos:])
+                
+                if not bold_match and not italic_match:
+                    # No more formatting, add remaining text
+                    remaining = processed_text[start_pos:]
+                    if remaining:
+                        elements.append({
+                            "endIndex": current_index + len(remaining),
+                            "startIndex": current_index - 1,
+                            "textRun": {"content": remaining}
+                        })
+                        current_index += len(remaining)
+                    break
+                
+                # Determine which comes first
+                if bold_match and italic_match:
+                    if bold_match.start() < italic_match.start():
+                        match = bold_match
+                        is_bold = True
+                    else:
+                        match = italic_match
+                        is_bold = False
+                elif bold_match:
+                    match = bold_match
+                    is_bold = True
+                else:
+                    match = italic_match
+                    is_bold = False
+                
+                # Add text before the match
+                before_text = processed_text[start_pos:start_pos + match.start()]
+                if before_text:
+                    elements.append({
+                        "endIndex": current_index + len(before_text),
+                        "startIndex": current_index - 1,
+                        "textRun": {"content": before_text}
+                    })
+                    current_index += len(before_text)
+                
+                # Add the formatted text
+                formatted_text = match.group(1)
+                text_style = {"bold": True} if is_bold else {"italic": True}
+                elements.append({
+                    "endIndex": current_index + len(formatted_text),
+                    "startIndex": current_index - 1,
+                    "textRun": {
+                        "content": formatted_text,
+                        "textStyle": text_style
+                    }
+                })
+                current_index += len(formatted_text)
+                
+                # Update start position
+                start_pos += match.end()
+            
+            # Add paragraph with elements
+            if elements:
+                content.append({
+                    "endIndex": current_index,
+                    "startIndex": current_index - 1,
+                    "paragraph": {"elements": elements}
+                })
+                current_index += 1
+    
+    return content
+
+# -------------------- TOOLS --------------------
+
+@mcp.tool(
+    "GOOGLEDOCS_CREATE_DOCUMENT",
+    description="Create Document. Creates a new Google Docs document using the provided title and, if non-empty, inserts the supplied text at the start of the body. Args: title (str): Name of the document (required). text (str): Initial body text (required; can be empty string). Returns: dict: { data: {documentId, title, revisionId, createdTime, modifiedTime}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_CREATE_DOCUMENT(
+    title: Annotated[str, "The title of the document to create."],
+    text: Annotated[str, "Initial text content for the document."]
+):
+    """Creates a new Google Docs document.
+
+    Creates a new Google Docs document using the provided title as filename and inserts 
+    the initial text at the beginning if non-empty, returning the document's id and 
+    metadata (excluding body content).
+
+    Args:
+        title (str): The title of the document to create.
+        text (str): Initial text content for the document.
+
+    Returns:
+        dict: Response containing data object with document metadata, error string, and success boolean.
+    """
+    err = _validate_required({"title": title, "text": text}, ["title", "text"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+    
+    try:
+        body = {"title": title}
+        if text.strip():
+            body["body"] = {
+                "content": [
+                    {
+                        "endIndex": 1,
+                        "startIndex": 1,
+                        "paragraph": {
+                            "elements": [
+                                {
+                                    "endIndex": len(text) + 1,
+                                    "startIndex": 1,
+                                    "textRun": {"content": text}
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+    
+        result = docs_request("create", body=body)
+        
+        return {
+            "data": {
+                "documentId": result.get("documentId"),
+                "title": result.get("title"),
+                "revisionId": result.get("revisionId"),
+                "createdTime": result.get("createdTime"),
+                "modifiedTime": result.get("modifiedTime")
+            },
+            "error": "",
+            "successful": True
+        }
+        
+    except Exception as e:
+        return {
+            "data": {},
+            "error": f"Failed to create document: {str(e)}",
+            "successful": False
+        }
+
+
+
+
+@mcp.tool(
+    "GOOGLEDOCS_COPY_DOCUMENT",
+    description="Copy Document. Duplicates an existing Google Docs file using the Drive API. Useful for templating. If no title is provided, Drive assigns a default (e.g., 'Copy of <title>'). Args: document_id (str): Source Docs file ID (required). title (str): New title (optional). Returns: dict: { data: {id, name, mimeType, parents}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_COPY_DOCUMENT(
+    document_id: Annotated[str, "The ID of the Google Docs document to copy."],
+    title: Annotated[Optional[str], "The title for the copied document. If not provided, will use 'Copy of [original title]'."] = None
+):
+    """Creates a copy of an existing Google Docs document.
+
+    Creates a copy of an existing Google Docs document. Use this to duplicate a document, 
+    for example, when using an existing document as a template. The copied document will 
+    have a default title (e.g., 'Copy of [original title]') if no new title is provided, 
+    and will be placed in the user's root Google Drive folder.
+
+    Args:
+        document_id (str): The ID of the Google Docs document to copy.
+        title (str, optional): The title for the copied document. If not provided, 
+            will use 'Copy of [original title]'.
+
+    Returns:
+        dict: Response containing data object with copied document information, error string, and success boolean.
+    """
+    err = _validate_required({"document_id": document_id}, ["document_id"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+    
+    try:
+        # Prepare the copy request body
+        copy_body = {}
+        if title:
+            copy_body["name"] = title
+        
+        # Execute the copy operation
+        result = docs_request("copy", document_id=document_id, body=copy_body)
+        
+        return {
+            "data": {
+                "id": result.get("id"),
+                "name": result.get("name"),
+                "mimeType": result.get("mimeType"),
+                "parents": result.get("parents", [])
+            },
+            "error": "",
+            "successful": True
+        }
+        
+    except Exception as e:
+        return {
+            "data": {},
+            "error": f"Failed to copy document: {str(e)}",
+            "successful": False
+        }
+
+@mcp.tool(
+    "GOOGLEDOCS_CREATE_DOCUMENT_MARKDOWN",
+    description="Create Document (Markdown). Converts provided markdown to formatted Google Docs content (basic headers, bold, italic, paragraphs) and creates a new document. Args: title (str): Document title (required). markdown_text (str): Markdown content to convert and insert (required). Returns: dict: { data: {documentId, title, revisionId, createdTime, modifiedTime}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_CREATE_DOCUMENT_MARKDOWN(
+    title: Annotated[str, "The title of the document to create."],
+    markdown_text: Annotated[str, "The markdown content to convert and insert into the document."]
+):
+    """Creates a new Google Docs document with markdown content.
+
+    Creates a new Google Docs document, optionally initializing it with a title 
+    and content provided as markdown text. The markdown will be converted to 
+    formatted Google Docs content including headers, bold, italic, and paragraph formatting.
+
+    Args:
+        title (str): The title of the document to create.
+        markdown_text (str): The markdown content to convert and insert into the document.
+
+    Returns:
+        dict: Response containing data object with document metadata, error string, and success boolean.
+    """
+    err = _validate_required({"title": title, "markdown_text": markdown_text}, ["title", "markdown_text"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+    
+    try:
+        # Convert markdown to Google Docs content format
+        content = _markdown_to_google_docs_content(markdown_text)
+        
+        # Create document body
+        body = {"title": title}
+        if content:
+            body["body"] = {"content": content}
+        
+        result = docs_request("create", body=body)
+        
+        return {
+            "data": {
+                "documentId": result.get("documentId"),
+                "title": result.get("title"),
+                "revisionId": result.get("revisionId"),
+                "createdTime": result.get("createdTime"),
+                "modifiedTime": result.get("modifiedTime")
+            },
+            "error": "",
+            "successful": True
+        }
+        
+    except Exception as e:
+        return {
+            "data": {},
+            "error": f"Failed to create markdown document: {str(e)}",
+            "successful": False
+        }
+
+@mcp.tool(
+    "GOOGLEDOCS_CREATE_FOOTNOTE",
+    description="Create Footnote. Inserts a footnote reference at a specific index or at an end-of-segment location; automatically clamps out-of-range indices to a valid position. Args: documentId (str): Target Docs ID (required). location (dict): { index } insertion point (optional). endOfSegmentLocation (dict): end-of-segment location (optional). Returns: dict: { data: {documentId, location, endOfSegmentLocation, replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_CREATE_FOOTNOTE(
+    documentId: Annotated[str, "The ID of the Google Docs document to add a footnote to."],
+    location: Annotated[Optional[Dict[str, Any]], "The location where the footnote reference should be inserted. If not provided, footnote will be added at the beginning of the document."] = None,
+    endOfSegmentLocation: Annotated[Optional[Dict[str, Any]], "Alternative location for the footnote reference. If both location and endOfSegmentLocation are provided, location takes precedence."] = None
+):
+    """Creates a new footnote in a Google document.
+
+    Tool to create a new footnote in a Google document. Use this when you need to add a footnote 
+    at a specific location or at the end of the document body.
+
+    Args:
+        documentId (str): The ID of the Google Docs document to add a footnote to.
+        location (dict, optional): The location where the footnote reference should be inserted. 
+            If not provided, footnote will be added at the beginning of the document.
+        endOfSegmentLocation (dict, optional): Alternative location for the footnote reference. 
+            If both location and endOfSegmentLocation are provided, location takes precedence.
+
+    Returns:
+        dict: Response containing data object with footnote information, error string, and success boolean.
+    """
+    err = _validate_required({"documentId": documentId}, ["documentId"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+    
+    try:
+        # First, get the document to understand its structure and length
+        doc = docs_request("get", document_id=documentId)
+        
+        # Get the document length
+        body_content = doc.get("body", {}).get("content", [])
+        if body_content:
+            # Find the last element to get the document length
+            last_element = body_content[-1]
+            doc_length = last_element.get("endIndex", 1)
+        else:
+            doc_length = 1
+        
+        # Prepare the batch update request
+        requests = []
+        
+        # Create footnote request - Google Docs API uses different field structure
+        footnote_request = {
+            "createFootnote": {}
+        }
+        
+        # Add footnote reference location (required by API)
+        if location:
+            # Validate the location index
+            if "index" in location and location["index"] >= doc_length:
+                location["index"] = doc_length - 1  # Place at end of document
+            footnote_request["createFootnote"]["location"] = location
+        elif endOfSegmentLocation:
+            footnote_request["createFootnote"]["endOfSegmentLocation"] = endOfSegmentLocation
+        else:
+            # If no location provided, use a valid location within the document
+            valid_index = max(1, doc_length - 1)
+            footnote_request["createFootnote"]["location"] = {"index": valid_index}
+        
+        requests.append(footnote_request)
+        
+        # Execute the batch update
+        body = {"requests": requests}
+        result = docs_request("batchUpdate", document_id=documentId, body=body)
+        
+        return {
+            "data": {
+                "documentId": documentId,
+                "location": location,
+                "endOfSegmentLocation": endOfSegmentLocation,
+                "replies": result.get("replies", [])
+            },
+            "error": "",
+            "successful": True
+        }
+        
+    except Exception as e:
+        return {
+            "data": {},
+            "error": f"Failed to create footnote: {str(e)}",
+            "successful": False
+        }
+
+@mcp.tool(
+    "GOOGLEDOCS_CREATE_HEADER",
+    description="Create Header. Adds a header to the document (DEFAULT or FIRST_PAGE). If FIRST_PAGE is requested, the tool enables first-page headers automatically. Args: documentId (str): Docs ID (required). createHeader (dict): { type: 'DEFAULT'|'FIRST_PAGE', sectionBreakLocation? } (required). Returns: dict: { data: {documentId, createHeader, replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_CREATE_HEADER(
+    documentId: Annotated[str, "The ID of the Google Docs document to add a header to."],
+    createHeader: Annotated[Dict[str, Any], "The header configuration object containing type and optional section information."]
+):
+    """Creates a new header in a Google document.
+
+    Tool to create a new header in a Google document. Use this tool when you need to add a header 
+    to a document, optionally specifying the section it applies to.
+
+    Args:
+        documentId (str): The ID of the Google Docs document to add a header to.
+        createHeader (dict): The header configuration object containing type and optional section information.
+
+    Returns:
+        dict: Response containing data object with header information, error string, and success boolean.
+    """
+    err = _validate_required({"documentId": documentId, "createHeader": createHeader}, ["documentId", "createHeader"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+    
+    try:
+        # Prepare the batch update request
+        requests = []
+        
+        # Create header request - ensure a valid type is always sent
+        requested_type = createHeader.get("type") if isinstance(createHeader, dict) else None
+        # Normalize common aliases to valid API enum values
+        type_mapping = {
+            "DEFAULT_HEADER": "DEFAULT",
+            "FIRST_PAGE_HEADER": "FIRST_PAGE",
+            "HEADER_FOOTER_TYPE_UNSPECIFIED": "DEFAULT",  # fall back to DEFAULT
+        }
+        normalized_type = type_mapping.get(requested_type, requested_type)
+        if normalized_type not in ("DEFAULT", "FIRST_PAGE"):
+            normalized_type = "DEFAULT"
+
+        header_request = {
+            "createHeader": {
+                "type": normalized_type
+            }
+        }
+        
+        # Add sectionBreakLocation if provided
+        if "sectionBreakLocation" in createHeader:
+            header_request["createHeader"]["sectionBreakLocation"] = createHeader["sectionBreakLocation"]
+        
+        requests.append(header_request)
+        
+        # Execute the batch update
+        body = {"requests": requests}
+        result = docs_request("batchUpdate", document_id=documentId, body=body)
+        
+        return {
+            "data": {
+                "documentId": documentId,
+                "createHeader": createHeader,
+                "replies": result.get("replies", [])
+            },
+            "error": "",
+            "successful": True
+        }
+        
+    except Exception as e:
+        return {
+            "data": {},
+            "error": f"Failed to create header: {str(e)}",
+            "successful": False
+        }
+
+# New tool: Create Named Range
+@mcp.tool(
+    "GOOGLEDOCS_CREATE_NAMED_RANGE",
+    description="Create Named Range. Defines a named range over a start/end index span; indices are validated against the document length and clamped if needed. Args: documentId (str): Docs ID (required). name (str): Named range label (required). rangeStartIndex (int): Inclusive start index (required). rangeEndIndex (int): Exclusive end index (required). rangeSegmentId (str): Segment ID for headers/footers (optional). Returns: dict: { data: {documentId, name, range, replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_CREATE_NAMED_RANGE(
+    documentId: Annotated[str, "The ID of the Google Docs document to add the named range to."],
+    name: Annotated[str, "The name to assign to the range."],
+    rangeStartIndex: Annotated[int, "The start index of the range (inclusive)."],
+    rangeEndIndex: Annotated[int, "The end index of the range (exclusive)."],
+    rangeSegmentId: Annotated[Optional[str], "The segmentId for the range (omit for body)."] = None,
+):
+    """Creates a named range in a Google document.
+
+    Creates a new named range in a Google document. Use this to assign a name to a specific
+    part of the document for easier reference or programmatic manipulation.
+
+    Args:
+        documentId (str): The ID of the target Google Docs document.
+        name (str): The name to assign to the range.
+        rangeStartIndex (int): Start index (inclusive) of the range.
+        rangeEndIndex (int): End index (exclusive) of the range.
+        rangeSegmentId (str, optional): Segment ID if targeting headers/footers; omit for body.
+
+    Returns:
+        dict: Response containing data object with named range info, error string, and success boolean.
+    """
+    err = _validate_required(
+        {"documentId": documentId, "name": name, "rangeStartIndex": rangeStartIndex, "rangeEndIndex": rangeEndIndex},
+        ["documentId", "name", "rangeStartIndex", "rangeEndIndex"],
+    )
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        # Fetch document to determine valid index bounds
+        doc = docs_request("get", document_id=documentId)
+        body_content = doc.get("body", {}).get("content", [])
+        if body_content:
+            last_element = body_content[-1]
+            doc_length = last_element.get("endIndex", 1)
+        else:
+            doc_length = 1
+
+        # Normalize indices to valid bounds
+        start_index = max(1, int(rangeStartIndex))
+        end_index = max(1, int(rangeEndIndex))
+        if end_index > doc_length:
+            end_index = doc_length
+        if start_index >= end_index:
+            return {
+                "data": {},
+                "error": f"Invalid range: start_index ({start_index}) must be < end_index ({end_index}).",
+                "successful": False,
+            }
+
+        create_named_range = {
+            "createNamedRange": {
+                "name": name,
+                "range": {
+                    "startIndex": start_index,
+                    "endIndex": end_index,
+                },
+            }
+        }
+        if rangeSegmentId:
+            create_named_range["createNamedRange"]["range"]["segmentId"] = rangeSegmentId
+
+        body = {"requests": [create_named_range]}
+        result = docs_request("batchUpdate", document_id=documentId, body=body)
+
+        return {
+            "data": {
+                "documentId": documentId,
+                "name": name,
+                "range": {
+                    "startIndex": start_index,
+                    "endIndex": end_index,
+                    **({"segmentId": rangeSegmentId} if rangeSegmentId else {}),
+                },
+                "replies": result.get("replies", []),
+            },
+            "error": "",
+            "successful": True,
+        }
+
+    except Exception as e:
+        return {
+            "data": {},
+            "error": f"Failed to create named range: {str(e)}",
+            "successful": False,
+        }
+
+# Add bullets to paragraphs
+@mcp.tool(
+    "GOOGLEDOCS_CREATE_PARAGRAPH_BULLETS",
+    description="Create Paragraph Bullets. Applies bullet formatting to paragraphs fully or partially covered by the provided text range; removes unspecified presets that are rejected by the API. Args: document_id (str): Docs ID (required). createParagraphBullets (dict): { range: {startIndex,endIndex[,segmentId]}, bulletPreset? } (required). Returns: dict: { data: {documentId, createParagraphBullets, replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_CREATE_PARAGRAPH_BULLETS(
+    document_id: Annotated[str, "The ID of the Google Docs document to update."],
+    createParagraphBullets: Annotated[Dict[str, Any], "The request object including range (startIndex/endIndex[/segmentId]) and optional bullet settings like bulletPreset."]
+):
+    """Adds bullets to paragraphs within a range.
+
+    Args:
+        document_id (str): Target document ID.
+        createParagraphBullets (dict): Must include a valid range. May include bulletPreset.
+
+    Returns:
+        dict: Response with replies from Docs API.
+    """
+    err = _validate_required({"document_id": document_id, "createParagraphBullets": createParagraphBullets}, ["document_id", "createParagraphBullets"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        # Fetch document to clamp indices
+        doc = docs_request("get", document_id=document_id)
+        body_content = doc.get("body", {}).get("content", [])
+        if body_content:
+            doc_length = body_content[-1].get("endIndex", 1)
+        else:
+            doc_length = 1
+
+        request_obj = dict(createParagraphBullets or {})
+        rng = request_obj.get("range") or {}
+        start_index = int(rng.get("startIndex", 1))
+        end_index = int(rng.get("endIndex", start_index + 1))
+        # Clamp to valid bounds
+        start_index = max(1, start_index)
+        end_index = max(start_index + 1, min(end_index, doc_length))
+
+        new_range: Dict[str, Any] = {"startIndex": start_index, "endIndex": end_index}
+        if "segmentId" in rng and rng["segmentId"]:
+            new_range["segmentId"] = rng["segmentId"]
+
+        request_obj["range"] = new_range
+        
+        # If preset is explicitly UNSPECIFIED, remove it so the API uses default.
+        if "bulletPreset" in request_obj:
+            if str(request_obj["bulletPreset"]).strip() == "BULLET_GLYPH_PRESET_UNSPECIFIED":
+                del request_obj["bulletPreset"]
+
+        body = {"requests": [{"createParagraphBullets": request_obj}]}
+        result = docs_request("batchUpdate", document_id=document_id, body=body)
+
+        return {
+            "data": {
+                "documentId": document_id,
+                "createParagraphBullets": request_obj,
+                "replies": result.get("replies", []),
+            },
+            "error": "",
+            "successful": True,
+        }
+
+    except Exception as e:
+        return {
+            "data": {},
+            "error": f"Failed to create paragraph bullets: {str(e)}",
+            "successful": False,
+        }
+
+# -------------------- GOOGLE SHEETS TOOLS --------------------
+
+@mcp.tool(
+    "GOOGLEDOCS_GET_CHARTS_FROM_SPREADSHEET",
+    description="Get Charts from Spreadsheet. Retrieves all embedded charts across sheets in a spreadsheet and returns each chart's ID and spec. Args: spreadsheet_id (str): Google Sheets ID (required). Returns: dict: { data: {spreadsheetId, sheetsWithCharts: [{sheetTitle, charts: [{chartId,spec}]}]}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_GET_CHARTS_FROM_SPREADSHEET(
+    spreadsheet_id: Annotated[str, "The ID of the Google Sheets spreadsheet to inspect for charts."]
+):
+    """Lists charts in a Google Sheets spreadsheet.
+
+    Args:
+        spreadsheet_id (str): Target spreadsheet ID.
+
+    Returns:
+        dict: data with list of charts per sheet, error, successful.
+    """
+    err = _validate_required({"spreadsheet_id": spreadsheet_id}, ["spreadsheet_id"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        from googleapiclient.discovery import build as build_sheets
+        creds = get_credentials()
+        sheets_service = build_sheets('sheets', 'v4', credentials=creds)
+
+        resp = sheets_service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            includeGridData=False,
+            fields='spreadsheetId,sheets(properties(title),charts(chartId,spec))'
+        ).execute()
+
+        sheets = resp.get('sheets', [])
+        charts_summary = []
+        for sh in sheets:
+            sheet_title = sh.get('properties', {}).get('title')
+            charts = sh.get('charts', []) or []
+            extracted = []
+            for ch in charts:
+                extracted.append({
+                    'chartId': ch.get('chartId'),
+                    'spec': ch.get('spec')
+                })
+            if extracted:
+                charts_summary.append({
+                    'sheetTitle': sheet_title,
+                    'charts': extracted
+                })
+
+        return {
+            'data': {
+                'spreadsheetId': spreadsheet_id,
+                'sheetsWithCharts': charts_summary
+            },
+            'error': '',
+            'successful': True
+        }
+    except Exception as e:
+        return {
+            'data': {},
+            'error': f'Failed to get charts: {str(e)}',
+            'successful': False
+        }
+
+# -------------------- GOOGLE DOCS UTILITIES --------------------
+
+@mcp.tool(
+    "GOOGLEDOCS_GET_DOCUMENT_BY_ID",
+    description="Get Document by ID. Fetches an existing Google Docs document by its ID; returns 404-style error information if not found. Args: id (str): Document ID (required). Returns: dict: { data: {documentId, title, revisionId, body}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_GET_DOCUMENT_BY_ID(
+    id: Annotated[str, "The Google Docs document ID to retrieve."]
+):
+    """Get a Google Docs document by ID.
+
+    Args:
+        id (str): The document ID to fetch.
+
+    Returns:
+        dict: Response containing data with document info, error string, and success boolean.
+    """
+    err = _validate_required({"id": id}, ["id"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        result = docs_request("get", document_id=id)
+        return {
+            "data": {
+                "documentId": result.get("documentId"),
+                "title": result.get("title"),
+                "revisionId": result.get("revisionId"),
+                "body": result.get("body", {})
+            },
+            "error": "",
+            "successful": True
+        }
+    except Exception as e:
+        return {
+            "data": {},
+            "error": f"Failed to get document: {str(e)}",
+            "successful": False
+        }
+
+@mcp.tool(
+    "GOOGLEDOCS_INSERT_INLINE_IMAGE",
+    description="Insert Inline Image. Inserts an image from a publicly accessible https URL at a given document index; optionally sets size in points. Args: documentId (str): Docs ID (required). location (dict): { index } insertion point (required). uri (str): Public image URL (required). objectSize (dict): { width:{magnitude,unit}, height:{magnitude,unit} } (optional). Returns: dict: { data: {documentId, location, uri, replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_INSERT_INLINE_IMAGE(
+    documentId: Annotated[str, "The ID of the Google Docs document to insert the image into."],
+    location: Annotated[Dict[str, Any], "The location where the image should be inserted. Usually a { 'index': number }."],
+    uri: Annotated[str, "Publicly accessible image URL to insert."],
+    objectSize: Annotated[Optional[Dict[str, Any]], "Optional object size with width/height in PT, e.g. { 'height': {'magnitude': 100, 'unit': 'PT'}, 'width': {'magnitude': 100, 'unit': 'PT'} }."] = None,
+):
+    """Insert an inline image into a Google Docs document.
+
+    Validates the target index against the document length and inserts the image
+    using Docs batchUpdate insertInlineImage.
+    """
+    err = _validate_required({"documentId": documentId, "location": location, "uri": uri}, ["documentId", "location", "uri"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        # Fetch document to clamp index
+        doc = docs_request("get", document_id=documentId)
+        body_content = doc.get("body", {}).get("content", [])
+        if body_content:
+            doc_length = body_content[-1].get("endIndex", 1)
+        else:
+            doc_length = 1
+
+        image_location = dict(location or {})
+        if "index" in image_location:
+            if image_location["index"] >= doc_length:
+                image_location["index"] = max(1, doc_length - 1)
+            if image_location["index"] < 1:
+                image_location["index"] = 1
+
+        request: Dict[str, Any] = {
+            "insertInlineImage": {
+                "location": image_location,
+                "uri": uri,
+            }
+        }
+        if objectSize:
+            request["insertInlineImage"]["objectSize"] = objectSize
+
+        result = docs_request("batchUpdate", document_id=documentId, body={"requests": [request]})
+
+        return {
+            "data": {
+                "documentId": documentId,
+                "location": image_location,
+                "uri": uri,
+                "replies": result.get("replies", []),
+            },
+            "error": "",
+            "successful": True,
+        }
+    except Exception as e:
+        return {
+            "data": {},
+            "error": f"Failed to insert inline image: {str(e)}",
+            "successful": False,
+        }
+
+# -------------------- MAIN --------------------
+
+if __name__ == "__main__":
+    mcp.run()
