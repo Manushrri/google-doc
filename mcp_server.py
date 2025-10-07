@@ -903,6 +903,256 @@ def GOOGLEDOCS_GET_DOCUMENT_BY_ID(
         }
 
 @mcp.tool(
+    "GOOGLEDOCS_INSERT_PAGE_BREAK",
+    description="Insert Page Break. Inserts a page break at a given location or at the end of a segment. Args: documentId (str): Docs ID (required). insertPageBreak (object): The request object as per Docs API; provide either location {index} or endOfSegmentLocation {segmentId} (required). Returns: dict: { data: {documentId, request, replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_INSERT_PAGE_BREAK(
+    documentId: Annotated[str, "The ID of the Google Docs document to update."],
+    insertPageBreak: Annotated[Dict[str, Any], "InsertPageBreak request object with either location or endOfSegmentLocation."]
+):
+    """Insert a page break into a Google Doc.
+
+    Validates the provided index against the document length when using location.index.
+    """
+    err = _validate_required({"documentId": documentId, "insertPageBreak": insertPageBreak}, ["documentId", "insertPageBreak"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req = dict(insertPageBreak or {})
+        # Clamp index if provided
+        if "location" in req and isinstance(req["location"], dict) and "index" in req["location"]:
+            doc = docs_request("get", document_id=documentId)
+            body_content = doc.get("body", {}).get("content", [])
+            doc_length = body_content[-1].get("endIndex", 1) if body_content else 1
+            idx = int(req["location"]["index"])
+            if idx >= doc_length:
+                req["location"]["index"] = max(1, doc_length - 1)
+            if idx < 1:
+                req["location"]["index"] = 1
+
+        result = docs_request("batchUpdate", document_id=documentId, body={"requests": [{"insertPageBreak": req}]})
+        return {
+            "data": {"documentId": documentId, "request": req, "replies": result.get("replies", [])},
+            "error": "",
+            "successful": True,
+        }
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to insert page break: {str(e)}", "successful": False}
+
+@mcp.tool(
+    "GOOGLEDOCS_INSERT_TABLE_ACTION",
+    description="Insert Table in Google Doc. Adds a table at a specific index or end of a segment (body/header/footer). Args: documentId (str): Docs ID (required). rows (int): Number of rows (required). columns (int): Number of columns (required). index (int): Text index to insert at (optional). insertAtEndOfSegment (bool): If true, ignore index and insert at end of segment (optional). segmentId (str): Segment to target when inserting at end (optional). tabId (str): Ignored placeholder (optional). Returns: dict: { data: {documentId, request, replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_INSERT_TABLE_ACTION(
+    documentId: Annotated[str, "The ID of the Google Docs document to update."],
+    rows: Annotated[int, "Number of rows to create."],
+    columns: Annotated[int, "Number of columns to create."],
+    index: Annotated[Optional[int], "Insertion index if not inserting at end of segment." ] = None,
+    insertAtEndOfSegment: Annotated[Optional[bool], "If true, insert at end of segment (body/header/footer)."] = None,
+    segmentId: Annotated[Optional[str], "Segment ID when targeting headers/footers."] = None,
+    tabId: Annotated[Optional[str], "Unused placeholder to match client signature."] = None,
+):
+    """Insert a table into a Google Doc at a location or end-of-segment."""
+    err = _validate_required({"documentId": documentId, "rows": rows, "columns": columns}, ["documentId", "rows", "columns"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        insert_req: Dict[str, Any] = {"rows": int(rows), "columns": int(columns)}
+        if insertAtEndOfSegment:
+            eos: Dict[str, Any] = {}
+            if segmentId:
+                eos["segmentId"] = segmentId
+            insert_req["endOfSegmentLocation"] = eos
+        else:
+            # Use provided index or clamp to end-1
+            target_index = int(index) if index is not None else None
+            if target_index is None:
+                doc = docs_request("get", document_id=documentId)
+                content = doc.get("body", {}).get("content", [])
+                doc_length = content[-1].get("endIndex", 1) if content else 1
+                target_index = max(1, doc_length - 1)
+            insert_req["location"] = {"index": max(1, int(target_index))}
+
+        result = docs_request("batchUpdate", document_id=documentId, body={"requests": [{"insertTable": insert_req}]})
+        return {
+            "data": {"documentId": documentId, "request": insert_req, "replies": result.get("replies", [])},
+            "error": "",
+            "successful": True,
+        }
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to insert table: {str(e)}", "successful": False}
+
+@mcp.tool(
+    "GOOGLEDOCS_INSERT_TABLE_COLUMN",
+    description="Insert Table Column. Adds a column to an existing table using raw Docs API requests. Args: document_id (str): Docs ID (required). requests (array): Array of Docs API request objects (required), typically with insertTableColumn entries (e.g., {insertTableColumn:{tableCellLocation:{tableStartLocation:{index},rowIndex,columnIndex}, insertRight:true}}). Returns: dict: { data: {documentId, replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_INSERT_TABLE_COLUMN(
+    document_id: Annotated[str, "The ID of the Google Docs document to update."],
+    requests: Annotated[List[Dict[str, Any]], "Docs API batchUpdate requests array containing insertTableColumn operations."]
+):
+    """Insert a table column by passing through Docs API batchUpdate requests."""
+    err = _validate_required({"document_id": document_id, "requests": requests}, ["document_id", "requests"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        body = {"requests": list(requests)}
+        result = docs_request("batchUpdate", document_id=document_id, body=body)
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to insert table column: {str(e)}", "successful": False}
+
+# -------------------- EXTRA SHEETS/DOCS TOOLS --------------------
+
+@mcp.tool(
+    "GOOGLEDOCS_LIST_SPREADSHEET_CHARTS_ACTION",
+    description="List Charts from Spreadsheet. Retrieves chart ids and metadata from a Google Sheets spreadsheet for embedding into Google Docs. Args: spreadsheet_id (str): Sheets ID (required). fields_mask (str): Optional fields mask; defaults to sheets(properties(sheetId,title),charts(chartId,spec(title,altText))). Returns: dict: { data: {spreadsheetId,sheetsWithCharts}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_LIST_SPREADSHEET_CHARTS_ACTION(
+    spreadsheet_id: Annotated[str, "The Google Sheets spreadsheet ID."],
+    fields_mask: Annotated[Optional[str], "Optional fields mask for spreadsheets.get."] = None,
+):
+    """List charts in a spreadsheet with optional fields mask."""
+    err = _validate_required({"spreadsheet_id": spreadsheet_id}, ["spreadsheet_id"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        from googleapiclient.discovery import build as build_sheets
+        creds = get_credentials()
+        sheets_service = build_sheets('sheets', 'v4', credentials=creds)
+
+        fields = fields_mask or 'sheets(properties(sheetId,title),charts(chartId,spec(title,altText)))'
+        # Always include spreadsheetId for reference
+        if 'spreadsheetId' not in fields:
+            fields = f'spreadsheetId,{fields}'
+
+        resp = sheets_service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            includeGridData=False,
+            fields=fields
+        ).execute()
+
+        charts_summary: List[Dict[str, Any]] = []
+        for sh in resp.get('sheets', []):
+            props = sh.get('properties', {})
+            title = props.get('title')
+            charts = sh.get('charts', []) or []
+            if charts:
+                charts_summary.append({
+                    'sheetTitle': title,
+                    'charts': charts
+                })
+
+        return {
+            'data': {
+                'spreadsheetId': resp.get('spreadsheetId', spreadsheet_id),
+                'sheetsWithCharts': charts_summary
+            },
+            'error': '',
+            'successful': True
+        }
+    except Exception as e:
+        return {'data': {}, 'error': f'Failed to list charts: {str(e)}', 'successful': False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_REPLACE_ALL_TEXT",
+    description="Replace All Text in Document. Replaces all occurrences of a string with another across the document. Args: document_id (str): Docs ID (required). find_text (str): Text to find (required). replace_text (str): Replacement text (required). match_case (bool): Case sensitive match (required). search_by_regex (bool): If true, attempts regex (Docs replaceAllText does not support full regex; best-effort). tab_ids (array): Ignored/unused placeholder. Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_REPLACE_ALL_TEXT(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    find_text: Annotated[str, "Text to find."],
+    replace_text: Annotated[str, "Text to replace with."],
+    match_case: Annotated[bool, "Whether match is case-sensitive."],
+    search_by_regex: Annotated[Optional[bool], "Best-effort regex flag (Docs API has limited support)."] = None,
+    tab_ids: Annotated[Optional[List[str]], "Unused placeholder for compatibility."] = None,
+):
+    """Replace all matching text throughout the document."""
+    err = _validate_required({"document_id": document_id, "find_text": find_text, "replace_text": replace_text, "match_case": match_case}, ["document_id", "find_text", "replace_text", "match_case"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req = {
+            'replaceAllText': {
+                'containsText': {
+                    'text': find_text,
+                    'matchCase': bool(match_case)
+                },
+                'replaceText': replace_text
+            }
+        }
+        result = docs_request('batchUpdate', document_id=document_id, body={'requests': [req]})
+        return {"data": {"documentId": document_id, "replies": result.get('replies', [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to replace text: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_REPLACE_IMAGE",
+    description="Replace Image in Document. Replaces a specific image with a new image from a URI. Args: document_id (str): Docs ID (required). replace_image (object): Docs replaceImage request body (required) e.g., {imageObjectId, uri, imageReplaceMethod?}. Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_REPLACE_IMAGE(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    replace_image: Annotated[Dict[str, Any], "The replaceImage request object as per Docs API."]
+):
+    """Replace an existing image via Docs API replaceImage."""
+    err = _validate_required({"document_id": document_id, "replace_image": replace_image}, ["document_id", "replace_image"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req = {"replaceImage": replace_image}
+        result = docs_request('batchUpdate', document_id=document_id, body={'requests': [req]})
+        return {"data": {"documentId": document_id, "replies": result.get('replies', [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to replace image: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_SEARCH_DOCUMENTS",
+    description="Search Documents. Searches Google Drive for Google Docs using filters like name, date ranges, sharing, starred, and more. Args: query (str): Free-form Drive query (optional). created_after (str): RFC3339 time (optional). modified_after (str): RFC3339 time (optional). include_trashed (bool): Include trashed (optional). shared_with_me (bool): Shared-with-me only (optional). starred_only (bool): Starred only (optional). order_by (str): Drive orderBy (default 'modifiedTime desc'). max_results (int): Page size (default 10). Returns: dict: { data: {files}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_SEARCH_DOCUMENTS(
+    query: Annotated[Optional[str], "Optional Drive query string." ] = None,
+    created_after: Annotated[Optional[str], "RFC3339 createdTime > value."] = None,
+    modified_after: Annotated[Optional[str], "RFC3339 modifiedTime > value."] = None,
+    include_trashed: Annotated[Optional[bool], "Include trashed files."] = None,
+    shared_with_me: Annotated[Optional[bool], "Only files shared with me."] = None,
+    starred_only: Annotated[Optional[bool], "Only starred files."] = None,
+    order_by: Annotated[Optional[str], "Drive orderBy param."] = 'modifiedTime desc',
+    max_results: Annotated[Optional[int], "Max results (page size)." ] = 10,
+):
+    """Search Google Drive for Google Docs files with filters."""
+    try:
+        from googleapiclient.discovery import build as build_drive
+        drive = build_drive('drive', 'v3', credentials=get_credentials())
+
+        q_parts = ["mimeType='application/vnd.google-apps.document'"]
+        if query:
+            # Perform a name contains search if simple query provided
+            q_parts.append(f"name contains '{query.replace("'", "\\'")}'")
+        if created_after:
+            q_parts.append(f"createdTime > '{created_after}'")
+        if modified_after:
+            q_parts.append(f"modifiedTime > '{modified_after}'")
+        if shared_with_me:
+            q_parts.append('sharedWithMe')
+        if starred_only:
+            q_parts.append('starred = true')
+        if not include_trashed:
+            q_parts.append('trashed = false')
+
+        q = ' and '.join(q_parts)
+        resp = drive.files().list(q=q, orderBy=order_by or 'modifiedTime desc', pageSize=int(max_results or 10), fields='files(id,name,mimeType,owners,createdTime,modifiedTime,starred)').execute()
+        return {"data": {"files": resp.get('files', [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to search documents: {str(e)}", "successful": False}
+
+@mcp.tool(
     "GOOGLEDOCS_INSERT_INLINE_IMAGE",
     description="Insert Inline Image. Inserts an image from a publicly accessible https URL at a given document index; optionally sets size in points. Args: documentId (str): Docs ID (required). location (dict): { index } insertion point (required). uri (str): Public image URL (required). objectSize (dict): { width:{magnitude,unit}, height:{magnitude,unit} } (optional). Returns: dict: { data: {documentId, location, uri, replies}, error: str, successful: bool }.",
 )
@@ -964,6 +1214,377 @@ def GOOGLEDOCS_INSERT_INLINE_IMAGE(
             "error": f"Failed to insert inline image: {str(e)}",
             "successful": False,
         }
+
+# ---------------------- Additional Update/Formatting Tools ----------------------
+
+@mcp.tool(
+    "GOOGLEDOCS_UNMERGE_TABLE_CELLS",
+    description="Unmerge Table Cells. Tool to unmerge previously merged cells in a table. Use this when you need to revert merged cells in a Google document table back to their individual cell states. Args: document_id (str): Docs ID (required). tableRange (object): Docs unmergeTableCells.tableRange object (required). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_UNMERGE_TABLE_CELLS(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    tableRange: Annotated[Dict[str, Any], "Docs API tableRange identifying cells to unmerge (must include tableStartLocation)."],
+):
+    """Unmerge previously merged cells using Docs API unmergeTableCells."""
+    err = _validate_required({"document_id": document_id, "tableRange": tableRange}, ["document_id", "tableRange"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req = {"unmergeTableCells": {"tableRange": tableRange}}
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": [req]})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to unmerge table cells: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_UPDATE_DOCUMENT_MARKDOWN",
+    description="Update Document Markdown. Replaces the entire content of an existing Google Docs document with new markdown text; requires edit permissions for the document. Args: document_id (str): Docs ID (required). new_markdown_text (str): Markdown text to insert (required). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_UPDATE_DOCUMENT_MARKDOWN(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    new_markdown_text: Annotated[str, "Markdown text to replace the entire document body."],
+):
+    """Replace entire body content with the provided markdown text as plain text."""
+    err = _validate_required({"document_id": document_id, "new_markdown_text": new_markdown_text}, ["document_id", "new_markdown_text"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        doc = docs_request("get", document_id=document_id)
+        body_content = doc.get("body", {}).get("content", [])
+        doc_len = body_content[-1].get("endIndex", 1) if body_content else 1
+
+        requests = [
+            {
+                "deleteContentRange": {
+                    "range": {"startIndex": 1, "endIndex": max(1, doc_len - 1)}
+                }
+            },
+            {"insertText": {"location": {"index": 1}, "text": new_markdown_text}},
+        ]
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": requests})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to update document with markdown: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_UPDATE_DOCUMENT_STYLE",
+    description="Update Document Style. Tool to update the overall document style, such as page size, margins, and default text direction. Use when you need to modify the global style settings of a Google document. Args: document_id (str): Docs ID (required). document_style (object): Docs DocumentStyle object (required). fields (str): Fields mask for properties to update (required). tab_id (str): Optional tabId (optional). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_UPDATE_DOCUMENT_STYLE(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    document_style: Annotated[Dict[str, Any], "DocumentStyle to apply (e.g., pageSize, margins)."],
+    fields: Annotated[str, "Comma-separated fields mask indicating which properties to update."],
+    tab_id: Annotated[Optional[str], "Optional tabId for multi-tab documents."] = None,
+):
+    """Update document-level style via updateDocumentStyle."""
+    err = _validate_required({"document_id": document_id, "document_style": document_style, "fields": fields}, ["document_id", "document_style", "fields"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req: Dict[str, Any] = {
+            "updateDocumentStyle": {
+                "documentStyle": document_style,
+                "fields": fields,
+            }
+        }
+        if tab_id:
+            req["updateDocumentStyle"]["tabId"] = tab_id
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": [req]})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to update document style: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_UPDATE_EXISTING_DOCUMENT",
+    description="Update existing document. Applies programmatic edits, such as text insertion, deletion, or formatting, to a specified Google Doc using the `batchupdate` API method. Args: document_id (str): Docs ID (required). editDocs (array): Array of raw Docs API request objects (required). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_UPDATE_EXISTING_DOCUMENT(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    editDocs: Annotated[List[Dict[str, Any]], "Array of Docs API request objects to send to batchUpdate."],
+):
+    """Pass-through for arbitrary batchUpdate requests."""
+    err = _validate_required({"document_id": document_id, "editDocs": editDocs}, ["document_id", "editDocs"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": editDocs})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to update existing document: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_UPDATE_TABLE_ROW_STYLE",
+    description="Update Table Row Style. Tool to update the style of a table row in a Google document. Use when you need to modify the appearance of specific rows within a table, such as setting minimum row height or marking rows as headers. Args: documentId (str): Docs ID (required). updateTableRowStyle (object): Docs updateTableRowStyle request body (required). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_UPDATE_TABLE_ROW_STYLE(
+    documentId: Annotated[str, "The Google Docs document ID."],
+    updateTableRowStyle: Annotated[Dict[str, Any], "Docs API updateTableRowStyle request object (including tableRange, tableRowStyle, fields)."],
+):
+    """Update a table row style using Docs API updateTableRowStyle."""
+    err = _validate_required({"documentId": documentId, "updateTableRowStyle": updateTableRowStyle}, ["documentId", "updateTableRowStyle"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        # Build the correct API request structure - tableRange goes inside tableRowStyle
+        tableRange = updateTableRowStyle.get("tableRange")
+        tableRowStyle = updateTableRowStyle.get("tableRowStyle", {})
+        fields = updateTableRowStyle.get("fields", "")
+        
+        # Create the complete tableRowStyle object with embedded tableRange
+        completeTableRowStyle = dict(tableRowStyle)
+        if tableRange:
+            completeTableRowStyle["tableRange"] = tableRange
+        
+        req = {
+            "updateTableRowStyle": {
+                "tableRowStyle": completeTableRowStyle,
+                "fields": fields
+            }
+        }
+        result = docs_request("batchUpdate", document_id=documentId, body={"requests": [req]})
+        return {"data": {"documentId": documentId, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to update table row style: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_INSERT_TEXT_ACTION",
+    description="Insert Text into Document. Tool to insert a string of text at a specified location within a Google document. Use when you need to add new text content to an existing document. Args: document_id (str): Docs ID (required). insertion_index (int): Index where to insert text (required). text_to_insert (str): Text to insert (required). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_INSERT_TEXT_ACTION(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    insertion_index: Annotated[int, "The index where to insert the text (0-based)."],
+    text_to_insert: Annotated[str, "The text to insert into the document."],
+):
+    """Insert text at a specified location in a Google Docs document."""
+    err = _validate_required({"document_id": document_id, "insertion_index": insertion_index, "text_to_insert": text_to_insert}, ["document_id", "insertion_index", "text_to_insert"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        # Get document length to validate index
+        doc = docs_request("get", document_id=document_id)
+        body_content = doc.get("body", {}).get("content", [])
+        doc_length = body_content[-1].get("endIndex", 1) if body_content else 1
+        
+        # Clamp index to valid range
+        clamped_index = max(1, min(insertion_index, doc_length - 1))
+        
+        req = {
+            "insertText": {
+                "location": {"index": clamped_index},
+                "text": text_to_insert
+            }
+        }
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": [req]})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to insert text: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_DELETE_CONTENT_RANGE",
+    description="Delete Content Range in Document. Tool to delete a range of content from a Google document. Use when you need to remove a specific portion of text or other structural elements within a document. Args: document_id (str): Docs ID (required). range (object): Range object with startIndex and endIndex (required). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_DELETE_CONTENT_RANGE(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    range: Annotated[Dict[str, Any], "Range object with startIndex and endIndex to delete."],
+):
+    """Delete a range of content from a Google Docs document."""
+    err = _validate_required({"document_id": document_id, "range": range}, ["document_id", "range"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req = {"deleteContentRange": {"range": range}}
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": [req]})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to delete content range: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_DELETE_FOOTER",
+    description="Delete Footer. Tool to delete a footer from a Google document. Use when you need to remove a footer from a specific section or the default footer. Args: document_id (str): Docs ID (required). footer_id (str): Footer ID to delete (required). tab_id (str): Optional tab ID (optional). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_DELETE_FOOTER(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    footer_id: Annotated[str, "The footer ID to delete."],
+    tab_id: Annotated[Optional[str], "Optional tab ID for multi-tab documents."] = None,
+):
+    """Delete a footer from a Google Docs document."""
+    err = _validate_required({"document_id": document_id, "footer_id": footer_id}, ["document_id", "footer_id"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req_body = {"deleteFooter": {"footerId": footer_id}}
+        if tab_id:
+            req_body["deleteFooter"]["tabId"] = tab_id
+        
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": [req_body]})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to delete footer: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_DELETE_HEADER",
+    description="Delete Header. Deletes the header from the specified section or the default header if no section is specified. Use this tool to remove a header from a Google document. Args: document_id (str): Docs ID (required). header_id (str): Header ID to delete (required). tab_id (str): Optional tab ID (optional). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_DELETE_HEADER(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    header_id: Annotated[str, "The header ID to delete."],
+    tab_id: Annotated[Optional[str], "Optional tab ID for multi-tab documents."] = None,
+):
+    """Delete a header from a Google Docs document."""
+    err = _validate_required({"document_id": document_id, "header_id": header_id}, ["document_id", "header_id"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req_body = {"deleteHeader": {"headerId": header_id}}
+        if tab_id:
+            req_body["deleteHeader"]["tabId"] = tab_id
+        
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": [req_body]})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to delete header: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_DELETE_NAMED_RANGE",
+    description="Delete Named Range. Tool to delete a named range from a Google document. Use when you need to remove a previously defined named range by its id or name. Args: document_id (str): Docs ID (required). deleteNamedRange (object): Delete named range request object (required). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_DELETE_NAMED_RANGE(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    deleteNamedRange: Annotated[Dict[str, Any], "Delete named range request object with namedRangeId or name."],
+):
+    """Delete a named range from a Google Docs document."""
+    err = _validate_required({"document_id": document_id, "deleteNamedRange": deleteNamedRange}, ["document_id", "deleteNamedRange"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req = {"deleteNamedRange": deleteNamedRange}
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": [req]})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to delete named range: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_DELETE_PARAGRAPH_BULLETS",
+    description="Delete Paragraph Bullets. Tool to remove bullets from paragraphs within a specified range in a Google document. Use when you need to clear bullet formatting from a section of a document. Args: document_id (str): Docs ID (required). range (object): Range object with startIndex and endIndex (required). tab_id (str): Optional tab ID (optional). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_DELETE_PARAGRAPH_BULLETS(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    range: Annotated[Dict[str, Any], "Range object with startIndex and endIndex to remove bullets from."],
+    tab_id: Annotated[Optional[str], "Optional tab ID for multi-tab documents."] = None,
+):
+    """Delete paragraph bullets from a specified range in a Google Docs document."""
+    err = _validate_required({"document_id": document_id, "range": range}, ["document_id", "range"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req_body = {"deleteParagraphBullets": {"range": range}}
+        if tab_id:
+            req_body["deleteParagraphBullets"]["tabId"] = tab_id
+        
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": [req_body]})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to delete paragraph bullets: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_DELETE_TABLE",
+    description="Delete Table. Tool to delete an entire table from a Google document. Use when you have the document id and the specific start and end index of the table element to be removed. The table's range can be found by inspecting the document's content structure. Args: document_id (str): Docs ID (required). table_start_index (int): Start index of table (required). table_end_index (int): End index of table (required). segment_id (str): Optional segment ID (optional). tab_id (str): Optional tab ID (optional). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_DELETE_TABLE(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    table_start_index: Annotated[int, "The start index of the table to delete."],
+    table_end_index: Annotated[int, "The end index of the table to delete."],
+    segment_id: Annotated[Optional[str], "Optional segment ID for multi-segment documents."] = None,
+    tab_id: Annotated[Optional[str], "Optional tab ID for multi-tab documents."] = None,
+):
+    """Delete an entire table from a Google Docs document."""
+    err = _validate_required({"document_id": document_id, "table_start_index": table_start_index, "table_end_index": table_end_index}, ["document_id", "table_start_index", "table_end_index"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        # Use deleteContentRange to delete the entire table
+        req_body = {
+            "deleteContentRange": {
+                "range": {
+                    "startIndex": table_start_index,
+                    "endIndex": table_end_index
+                }
+            }
+        }
+        if segment_id:
+            req_body["deleteContentRange"]["range"]["segmentId"] = segment_id
+        if tab_id:
+            req_body["deleteContentRange"]["tabId"] = tab_id
+        
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": [req_body]})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to delete table: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_DELETE_TABLE_COLUMN",
+    description="Delete Table Column. Tool to delete a column from a table in a Google document. Use this tool when you need to remove a specific column from an existing table within a document. Args: document_id (str): Docs ID (required). requests (array): Array of deleteTableColumn request objects (required). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_DELETE_TABLE_COLUMN(
+    document_id: Annotated[str, "The Google Docs document ID."],
+    requests: Annotated[List[Dict[str, Any]], "Array of deleteTableColumn request objects."],
+):
+    """Delete columns from a table in a Google Docs document."""
+    err = _validate_required({"document_id": document_id, "requests": requests}, ["document_id", "requests"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        result = docs_request("batchUpdate", document_id=document_id, body={"requests": requests})
+        return {"data": {"documentId": document_id, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to delete table column: {str(e)}", "successful": False}
+
+
+@mcp.tool(
+    "GOOGLEDOCS_DELETE_TABLE_ROW",
+    description="Delete Table Row. Tool to delete a row from a table in a Google document. Use when you need to remove a specific row from an existing table. Args: documentId (str): Docs ID (required). tableCellLocation (object): Table cell location object (required). Returns: dict: { data: {documentId,replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_DELETE_TABLE_ROW(
+    documentId: Annotated[str, "The Google Docs document ID."],
+    tableCellLocation: Annotated[Dict[str, Any], "Table cell location object specifying which row to delete."],
+):
+    """Delete a row from a table in a Google Docs document."""
+    err = _validate_required({"documentId": documentId, "tableCellLocation": tableCellLocation}, ["documentId", "tableCellLocation"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+
+    try:
+        req = {"deleteTableRow": {"tableCellLocation": tableCellLocation}}
+        result = docs_request("batchUpdate", document_id=documentId, body={"requests": [req]})
+        return {"data": {"documentId": documentId, "replies": result.get("replies", [])}, "error": "", "successful": True}
+    except Exception as e:
+        return {"data": {}, "error": f"Failed to delete table row: {str(e)}", "successful": False}
+
 
 # -------------------- MAIN --------------------
 
