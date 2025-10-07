@@ -142,3 +142,48 @@ Security Notes
 --------------
 - Keep credentials and tokens private; do not commit them
 - Treat `token.json` as sensitive (refresh token inside)
+
+Obtaining credentials.json and how token.json is created
+--------------------------------------------------------
+Follow these steps once to create `credentials.json`. After that, the server will guide you through OAuth and write `token.json` automatically on first run.
+
+1) Create a Google Cloud project (or reuse one)
+- Open the Google Cloud Console: `https://console.cloud.google.com/`
+- Select an existing project or create a new one
+
+2) Enable required APIs in that project
+- APIs & Services → Library
+- Enable: Google Docs API and Google Drive API (Sheets API is optional for charts tools)
+
+3) Configure the OAuth consent screen (first time only)
+- APIs & Services → OAuth consent screen
+- Choose External (recommended) or Internal depending on your organization
+- App name can be anything (e.g., "Docs MCP")
+- Add a support email and developer contact email
+- Scopes: The app will request scopes at runtime, but you can add these as references:
+  - `https://www.googleapis.com/auth/documents`
+  - `https://www.googleapis.com/auth/drive.file`
+  - `https://www.googleapis.com/auth/drive.readonly`
+  - `https://www.googleapis.com/auth/spreadsheets.readonly` (optional)
+- Test users: add the Google account(s) you will log in with if your app is in testing mode
+- Save/publish changes
+
+4) Create OAuth client credentials (Desktop application)
+- APIs & Services → Credentials → Create Credentials → OAuth client ID
+- Application type: Desktop app
+- Click Create
+- Download the JSON; this is your `credentials.json`
+
+5) Put `credentials.json` where the server expects it
+- Place the file at `googledoc_mcp/credentials.json` (or set `GOOGLE_CREDENTIALS_PATH` in `googledoc_mcp/.env` to the absolute/relative path)
+
+6) First run to generate `token.json`
+- Run: `uv run googledoc_mcp/mcp_server.py`
+- A browser window opens to the Google consent screen; sign in with a test/allowed user and grant access
+- On success, the server saves `googledoc_mcp/token.json` (path controlled by `GOOGLE_TOKEN_PATH`)
+- Subsequent runs reuse `token.json` to refresh access without prompting again
+
+Troubleshooting credentials/token
+- 403 or scope errors: delete `googledoc_mcp/token.json` and run again to re-consent
+- Wrong project or missing API enablement: double-check which GCP project your credentials belong to and that Docs/Drive APIs are enabled
+- Multiple accounts: ensure the browser flow uses the same Google account that owns/has access to the target Docs/Drive files
