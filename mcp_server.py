@@ -629,9 +629,135 @@ def GOOGLEDOCS_CREATE_HEADER(
         }
         
     except Exception as e:
+        error_str = str(e)
+        # Check if the error is because header already exists
+        if "already exists" in error_str:
+            # Get the existing header ID from the document
+            try:
+                doc = docs_request("get", document_id=documentId)
+                headers = doc.get("headers", {})
+                if headers:
+                    # Get the first header ID
+                    header_id = list(headers.keys())[0]
+                    return {
+                        "data": {
+                            "documentId": documentId,
+                            "createHeader": createHeader,
+                            "replies": [{
+                                "createHeader": {
+                                    "headerId": header_id
+                                }
+                            }]
+                        },
+                        "error": "",
+                        "successful": True
+                    }
+            except:
+                pass
+        
         return {
             "data": {},
-            "error": f"Failed to create header: {str(e)}",
+            "error": f"Failed to create header: {error_str}",
+            "successful": False
+        }
+
+@mcp.tool(
+    "GOOGLEDOCS_CREATE_FOOTER",
+    description="Create Footer. Tool to create a new footer in a Google document. Use when you need to add a footer, optionally specifying its type and the section it applies to. Args: document_id (str): Docs ID (required). createFooter (dict): { type: 'DEFAULT'|'FIRST_PAGE', sectionBreakLocation? } (required). Returns: dict: { data: {documentId, createFooter, replies}, error: str, successful: bool }.",
+)
+def GOOGLEDOCS_CREATE_FOOTER(
+    document_id: Annotated[str, "The ID of the Google Docs document to add a footer to."],
+    createFooter: Annotated[Dict[str, Any], "The footer configuration object containing type and optional section information."]
+):
+    """Creates a new footer in a Google document.
+
+    Tool to create a new footer in a Google document. Use this when you need to add a footer 
+    to a document, optionally specifying the section it applies to.
+
+    Args:
+        document_id (str): The ID of the Google Docs document to add a footer to.
+        createFooter (dict): The footer configuration object containing type and optional section information.
+
+    Returns:
+        dict: Response containing data object with footer information, error string, and success boolean.
+    """
+    err = _validate_required({"document_id": document_id, "createFooter": createFooter}, ["document_id", "createFooter"])
+    if err:
+        return {"data": {}, "error": str(err), "successful": False}
+    
+    try:
+        # Prepare the batch update request
+        requests = []
+        
+        # Create footer request - ensure a valid type is always sent
+        requested_type = createFooter.get("type") if isinstance(createFooter, dict) else None
+        # Normalize common aliases to valid API enum values
+        type_mapping = {
+            "DEFAULT_FOOTER": "DEFAULT",
+            "FIRST_PAGE_FOOTER": "FIRST_PAGE",
+            "HEADER_FOOTER_TYPE_UNSPECIFIED": "DEFAULT",  # fall back to DEFAULT
+        }
+        normalized_type = type_mapping.get(requested_type, requested_type)
+        if normalized_type not in ("DEFAULT", "FIRST_PAGE"):
+            normalized_type = "DEFAULT"
+
+        # Try using the exact structure that worked before
+        footer_request = {
+            "createFooter": {
+                "type": normalized_type
+            }
+        }
+        
+        # Add sectionBreakLocation if provided
+        if "sectionBreakLocation" in createFooter:
+            footer_request["createFooter"]["sectionBreakLocation"] = createFooter["sectionBreakLocation"]
+        
+        requests.append(footer_request)
+        
+        # Execute the batch update
+        body = {"requests": requests}
+        result = docs_request("batchUpdate", document_id=document_id, body=body)
+        
+        return {
+            "data": {
+                "documentId": document_id,
+                "createFooter": createFooter,
+                "replies": result.get("replies", [])
+            },
+            "error": "",
+            "successful": True
+        }
+        
+    except Exception as e:
+        error_str = str(e)
+        # Check if the error is because footer already exists
+        if "already exists" in error_str:
+            # Get the existing footer ID from the document
+            try:
+                doc = docs_request("get", document_id=document_id)
+                footers = doc.get("footers", {})
+                if footers:
+                    # Get the first footer ID
+                    footer_id = list(footers.keys())[0]
+                    return {
+                        "data": {
+                            "documentId": document_id,
+                            "createFooter": createFooter,
+                            "replies": [{
+                                "createFooter": {
+                                    "footerId": footer_id
+                                }
+                            }]
+                        },
+                        "error": "",
+                        "successful": True
+                    }
+            except:
+                pass
+        
+        return {
+            "data": {},
+            "error": f"Failed to create footer: {error_str}",
             "successful": False
         }
 
@@ -1326,7 +1452,7 @@ def GOOGLEDOCS_UPDATE_EXISTING_DOCUMENT(
 )
 def GOOGLEDOCS_UPDATE_TABLE_ROW_STYLE(
     documentId: Annotated[str, "The Google Docs document ID."],
-    updateTableRowStyle: Annotated[Dict[str, Any], "Docs API updateTableRowStyle request object (including tableRange, tableRowStyle, fields)."],
+    updateTableRowStyle: Annotated[Dict[str, Any], "Docs API updateTableRowStyle request object. Accepts either the modern shape {tableStartLocation,rowIndices,tableRowStyle,fields} or a legacy shape using tableRange that will be translated."],
 ):
     """Update a table row style using Docs API updateTableRowStyle."""
     err = _validate_required({"documentId": documentId, "updateTableRowStyle": updateTableRowStyle}, ["documentId", "updateTableRowStyle"])
@@ -1334,22 +1460,37 @@ def GOOGLEDOCS_UPDATE_TABLE_ROW_STYLE(
         return {"data": {}, "error": str(err), "successful": False}
 
     try:
-        # Build the correct API request structure - tableRange goes inside tableRowStyle
-        tableRange = updateTableRowStyle.get("tableRange")
-        tableRowStyle = updateTableRowStyle.get("tableRowStyle", {})
+        # Prefer passing through modern shape directly if provided
+        req_payload: Dict[str, Any] = {}
         fields = updateTableRowStyle.get("fields", "")
-        
-        # Create the complete tableRowStyle object with embedded tableRange
-        completeTableRowStyle = dict(tableRowStyle)
-        if tableRange:
-            completeTableRowStyle["tableRange"] = tableRange
-        
-        req = {
-            "updateTableRowStyle": {
-                "tableRowStyle": completeTableRowStyle,
-                "fields": fields
-            }
-        }
+
+        # Modern shape
+        if "tableStartLocation" in updateTableRowStyle or "rowIndices" in updateTableRowStyle:
+            if "tableStartLocation" in updateTableRowStyle:
+                req_payload["tableStartLocation"] = updateTableRowStyle["tableStartLocation"]
+            if "rowIndices" in updateTableRowStyle:
+                req_payload["rowIndices"] = list(updateTableRowStyle.get("rowIndices", []))
+            req_payload["tableRowStyle"] = dict(updateTableRowStyle.get("tableRowStyle", {}))
+            req_payload["fields"] = fields
+        else:
+            # Legacy shape: { tableRange, tableRowStyle, fields }
+            tableRange = updateTableRowStyle.get("tableRange")
+            tableRowStyle = updateTableRowStyle.get("tableRowStyle", {})
+
+            # If legacy provided, try to derive rowIndices from tableRange when possible
+            if tableRange and isinstance(tableRange, dict):
+                table_cell_loc = tableRange.get("tableCellLocation", {})
+                start_loc = table_cell_loc.get("tableStartLocation")
+                start_row = table_cell_loc.get("rowIndex")
+                row_span = tableRange.get("rowSpan")
+                if start_loc is not None and start_row is not None and row_span:
+                    req_payload["tableStartLocation"] = start_loc
+                    req_payload["rowIndices"] = list(range(int(start_row), int(start_row) + int(row_span)))
+                # If we cannot derive, fall back to API expecting tableRowStyle only (may error)
+            req_payload["tableRowStyle"] = dict(tableRowStyle)
+            req_payload["fields"] = fields
+
+        req = {"updateTableRowStyle": req_payload}
         result = docs_request("batchUpdate", document_id=documentId, body={"requests": [req]})
         return {"data": {"documentId": documentId, "replies": result.get("replies", [])}, "error": "", "successful": True}
     except Exception as e:
