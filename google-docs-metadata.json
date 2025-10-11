@@ -1,0 +1,291 @@
+{
+  "google-docs": {
+    "description": "Google Docs MCP server for creating, editing, and managing Google Docs documents, including tables, images, headers, footers, and formatting via natural language.",
+    "tools": [
+      {
+        "name": "GOOGLEDOCS_CREATE_DOCUMENT",
+        "description": "Create Document. Creates a new Google Docs document using the provided title and, if non-empty, inserts the supplied text at the start of the body.",
+        "parameters": {
+          "title": "string - Name of the document (required)",
+          "text": "string - Initial body text (required; can be empty string)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_COPY_DOCUMENT",
+        "description": "Copy Document. Duplicates an existing Google Docs file using the Drive API. Useful for templating.",
+        "parameters": {
+          "document_id": "string - Source Docs file ID (required)",
+          "title": "string - New title (optional)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_CREATE_DOCUMENT_MARKDOWN",
+        "description": "Create Document (Markdown). Converts provided markdown to formatted Google Docs content (basic headers, bold, italic, paragraphs) and creates a new document.",
+        "parameters": {
+          "title": "string - Document title (required)",
+          "markdown_text": "string - Markdown content to convert and insert (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_GET_DOCUMENT_BY_ID",
+        "description": "Get Document by ID. Fetches an existing Google Docs document by its ID; returns 404-style error information if not found.",
+        "parameters": {
+          "id": "string - Document ID (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_SEARCH_DOCUMENTS",
+        "description": "Search Documents. Searches Google Drive for Google Docs using filters like name, date ranges, sharing, starred, and more.",
+        "parameters": {
+          "query": "string (optional) - Free-form Drive query",
+          "created_after": "string (optional) - RFC3339 time",
+          "modified_after": "string (optional) - RFC3339 time",
+          "include_trashed": "boolean (optional) - Include trashed",
+          "shared_with_me": "boolean (optional) - Shared-with-me only",
+          "starred_only": "boolean (optional) - Starred only",
+          "order_by": "string (optional) - Drive orderBy (default 'modifiedTime desc')",
+          "max_results": "number (optional) - Page size (default 10)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_CREATE_HEADER",
+        "description": "Create Header. Adds a header to the document (DEFAULT or FIRST_PAGE). If FIRST_PAGE is requested, the tool enables first-page headers automatically.",
+        "parameters": {
+          "documentId": "string - Docs ID (required)",
+          "createHeader": "object - { type: 'DEFAULT'|'FIRST_PAGE', sectionBreakLocation? } (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_CREATE_FOOTER",
+        "description": "Create Footer. Tool to create a new footer in a Google document. Use when you need to add a footer, optionally specifying its type and the section it applies to.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "createFooter": "object - { type: 'DEFAULT'|'FIRST_PAGE', sectionBreakLocation? } (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_DELETE_HEADER",
+        "description": "Delete Header. Deletes the header from the specified section or the default header if no section is specified.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "header_id": "string - Header ID to delete (required)",
+          "tab_id": "string (optional) - Optional tab ID"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_DELETE_FOOTER",
+        "description": "Delete Footer. Tool to delete a footer from a Google document. Use when you need to remove a footer from a specific section or the default footer.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "footer_id": "string - Footer ID to delete (required)",
+          "tab_id": "string (optional) - Optional tab ID"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_CREATE_FOOTNOTE",
+        "description": "Create Footnote. Inserts a footnote reference at a specific index or at an end-of-segment location; automatically clamps out-of-range indices to a valid position.",
+        "parameters": {
+          "documentId": "string - Target Docs ID (required)",
+          "location": "object (optional) - { index } insertion point",
+          "endOfSegmentLocation": "object (optional) - end-of-segment location"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_INSERT_TEXT_ACTION",
+        "description": "Insert Text into Document. Tool to insert a string of text at a specified location within a Google document.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "insertion_index": "number - Index where to insert text (required)",
+          "text_to_insert": "string - Text to insert (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_DELETE_CONTENT_RANGE",
+        "description": "Delete Content Range in Document. Tool to delete a range of content from a Google document.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "range": "object - Range object with startIndex and endIndex (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_REPLACE_ALL_TEXT",
+        "description": "Replace All Text in Document. Replaces all occurrences of a string with another across the document.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "find_text": "string - Text to find (required)",
+          "replace_text": "string - Replacement text (required)",
+          "match_case": "boolean - Case sensitive match (required)",
+          "search_by_regex": "boolean (optional) - If true, attempts regex",
+          "tab_ids": "array (optional) - Ignored/unused placeholder"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_UPDATE_DOCUMENT_MARKDOWN",
+        "description": "Update Document Markdown. Replaces the entire content of an existing Google Docs document with new markdown text.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "new_markdown_text": "string - Markdown text to insert (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_UPDATE_DOCUMENT_STYLE",
+        "description": "Update Document Style. Tool to update the overall document style, such as page size, margins, and default text direction.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "document_style": "object - DocumentStyle object (required)",
+          "fields": "string - Fields mask for properties to update (required)",
+          "tab_id": "string (optional) - Optional tabId"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_UPDATE_EXISTING_DOCUMENT",
+        "description": "Update existing document. Applies programmatic edits, such as text insertion, deletion, or formatting, to a specified Google Doc using the batchupdate API method.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "editDocs": "array - Array of raw Docs API request objects (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_INSERT_INLINE_IMAGE",
+        "description": "Insert Inline Image. Inserts an image from a publicly accessible https URL at a given document index; optionally sets size in points.",
+        "parameters": {
+          "documentId": "string - Docs ID (required)",
+          "location": "object - { index } insertion point (required)",
+          "uri": "string - Public image URL (required)",
+          "objectSize": "object (optional) - { width:{magnitude,unit}, height:{magnitude,unit} }"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_REPLACE_IMAGE",
+        "description": "Replace Image in Document. Replaces a specific image with a new image from a URI.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "replace_image": "object - Docs replaceImage request body (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_INSERT_PAGE_BREAK",
+        "description": "Insert Page Break. Inserts a page break at a given location or at the end of a segment.",
+        "parameters": {
+          "documentId": "string - Docs ID (required)",
+          "insertPageBreak": "object - The request object as per Docs API (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_CREATE_PARAGRAPH_BULLETS",
+        "description": "Create Paragraph Bullets. Applies bullet formatting to paragraphs fully or partially covered by the provided text range.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "createParagraphBullets": "object - { range: {startIndex,endIndex[,segmentId]}, bulletPreset? } (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_DELETE_PARAGRAPH_BULLETS",
+        "description": "Delete Paragraph Bullets. Tool to remove bullets from paragraphs within a specified range in a Google document.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "range": "object - Range object with startIndex and endIndex (required)",
+          "tab_id": "string (optional) - Optional tab ID"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_CREATE_NAMED_RANGE",
+        "description": "Create Named Range. Defines a named range over a start/end index span; indices are validated against the document length and clamped if needed.",
+        "parameters": {
+          "documentId": "string - Docs ID (required)",
+          "name": "string - Named range label (required)",
+          "rangeStartIndex": "number - Inclusive start index (required)",
+          "rangeEndIndex": "number - Exclusive end index (required)",
+          "rangeSegmentId": "string (optional) - Segment ID for headers/footers"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_DELETE_NAMED_RANGE",
+        "description": "Delete Named Range. Tool to delete a named range from a Google document. Use when you need to remove a previously defined named range by its id or name.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "deleteNamedRange": "object - Delete named range request object (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_INSERT_TABLE_ACTION",
+        "description": "Insert Table in Google Doc. Adds a table at a specific index or end of a segment (body/header/footer).",
+        "parameters": {
+          "documentId": "string - Docs ID (required)",
+          "rows": "number - Number of rows (required)",
+          "columns": "number - Number of columns (required)",
+          "index": "number (optional) - Text index to insert at",
+          "insertAtEndOfSegment": "boolean (optional) - If true, ignore index and insert at end of segment",
+          "segmentId": "string (optional) - Segment to target when inserting at end",
+          "tabId": "string (optional) - Ignored placeholder"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_INSERT_TABLE_COLUMN",
+        "description": "Insert Table Column. Adds a column to an existing table using raw Docs API requests.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "requests": "array - Array of Docs API request objects (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_DELETE_TABLE",
+        "description": "Delete Table. Tool to delete an entire table from a Google document.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "table_start_index": "number - Start index of table (required)",
+          "table_end_index": "number - End index of table (required)",
+          "segment_id": "string (optional) - Optional segment ID",
+          "tab_id": "string (optional) - Optional tab ID"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_DELETE_TABLE_COLUMN",
+        "description": "Delete Table Column. Tool to delete a column from a table in a Google document.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "requests": "array - Array of deleteTableColumn request objects (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_DELETE_TABLE_ROW",
+        "description": "Delete Table Row. Tool to delete a row from a table in a Google document.",
+        "parameters": {
+          "documentId": "string - Docs ID (required)",
+          "tableCellLocation": "object - Table cell location object (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_UNMERGE_TABLE_CELLS",
+        "description": "Unmerge Table Cells. Tool to unmerge previously merged cells in a table.",
+        "parameters": {
+          "document_id": "string - Docs ID (required)",
+          "tableRange": "object - Docs unmergeTableCells.tableRange object (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_UPDATE_TABLE_ROW_STYLE",
+        "description": "Update Table Row Style. Tool to update the style of a table row in a Google document.",
+        "parameters": {
+          "documentId": "string - Docs ID (required)",
+          "updateTableRowStyle": "object - Docs updateTableRowStyle request body (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_GET_CHARTS_FROM_SPREADSHEET",
+        "description": "Get Charts from Spreadsheet. Retrieves all embedded charts across sheets in a spreadsheet and returns each chart's ID and spec.",
+        "parameters": {
+          "spreadsheet_id": "string - Google Sheets ID (required)"
+        }
+      },
+      {
+        "name": "GOOGLEDOCS_LIST_SPREADSHEET_CHARTS_ACTION",
+        "description": "List Charts from Spreadsheet. Retrieves chart ids and metadata from a Google Sheets spreadsheet for embedding into Google Docs.",
+        "parameters": {
+          "spreadsheet_id": "string - Sheets ID (required)",
+          "fields_mask": "string (optional) - Optional fields mask"
+        }
+      }
+    ]
+  }
+}
