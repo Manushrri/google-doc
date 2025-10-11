@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "google-docs": {
+      "command": "bash",
+      "args": ["-c", "cd /app/LocalMCPs/googledocs-mcp && uv run googledoc_mcp/mcp_server.py"],
+      "type": "stdio",
+      "env": {
+        "GOOGLE_CREDENTIALS_PATH": {
+          "source": "project",
+          "collection_method": "none",
+          "env_var": "GOOGLE_CREDENTIALS_PATH"
+        },
+        "GOOGLE_TOKEN_PATH": {
+          "source": "user",
+          "collection_method": "both",
+          "oauth_url": "/api/v1/common/oauth/google-docs/start"
+        }
+      }
+    }
+  }
+}
